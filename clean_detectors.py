@@ -3,6 +3,7 @@
 
 import sys
 import ezdxf
+import ezdxf.recover
 from pathlib import Path
 
 if len(sys.argv) < 2:
@@ -27,9 +28,29 @@ print(f"📁 Input:  {input_path}")
 print(f"📁 Output: {output_path}")
 print("")
 
-# Read file
-doc = ezdxf.readfile(input_path.as_posix())
-msp = doc.modelspace()
+# Read file with error handling
+try:
+    doc = ezdxf.readfile(input_path.as_posix())
+except Exception as e:
+    print(f"⚠️  Normal read failed: {e}")
+    print(f"   Trying recovery mode...")
+    
+    # Try recover mode
+    try:
+        doc = ezdxf.recover.readfile(input_path.as_posix())
+        print(f"✅ Recovered file successfully!")
+    except Exception as e2:
+        print(f"❌ Recovery also failed: {e2}")
+        print(f"\n💡 Please try:")
+        print(f"   1. Run: python3 fix_dxf.py \"{input_path}\"")
+        print(f"   2. Open file in AutoCAD and Save As → DXF R2018")
+        sys.exit(1)
+
+try:
+    msp = doc.modelspace()
+except Exception as e:
+    print(f"❌ Error accessing modelspace: {e}")
+    sys.exit(1)
 
 # Count and remove smoke detector INSERTs
 removed_count = 0

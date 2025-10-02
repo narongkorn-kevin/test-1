@@ -37,9 +37,9 @@ fi
 
 echo ""
 
-# Step 2: Place detectors
-echo "Step 2/2: Placing new detectors..."
-python3 smoke_detector_placer.py "$CLEAN_FILE" --rooms-layer 00_VAV_ZONE --offset-x 300001 --offset-y 0 --no-pdf
+# Step 2: Place detectors with AUTO DETECTION
+echo "Step 2/2: Placing new detectors (AUTO MODE)..."
+python3 smoke_detector_placer.py "$CLEAN_FILE" --no-pdf
 
 if [ $? -ne 0 ]; then
     echo "❌ Placement failed!"

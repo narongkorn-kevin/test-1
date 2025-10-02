@@ -63,6 +63,21 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+# Test tkinter (for GUI)
+echo ""
+python3 -c "import tkinter; print('✅ Tkinter (GUI support) available')" 2>/dev/null
+
+if [ $? -ne 0 ]; then
+    echo "⚠️  Tkinter not available - GUI will not work"
+    echo "   Command line interface will work fine"
+    echo ""
+    echo "   To enable GUI on macOS:"
+    echo "   brew install python-tk@3.11"
+    echo ""
+    echo "   To enable GUI on Ubuntu/Debian:"
+    echo "   sudo apt-get install python3-tk"
+fi
+
 echo ""
 echo "════════════════════════════════════════════════════════════════════════════"
 echo "✅ Setup Complete!"
@@ -70,11 +85,16 @@ echo "════════════════════════�
 echo ""
 echo "You can now use the program:"
 echo ""
+echo "🖥️  GUI (Recommended):"
+echo "  ./run_gui.sh"
+echo ""
+echo "⌨️  Command Line:"
 echo "  ./auto_place_detectors.sh input.dxf"
 echo ""
-echo "For help:"
-echo "  cat QUICK_START.md"
-echo "  cat README.md"
+echo "📚 Documentation:"
+echo "  cat GUI_GUIDE.md          # GUI guide"
+echo "  cat QUICK_START.md        # Quick start"
+echo "  cat README.md             # Full documentation"
 echo ""
 echo "════════════════════════════════════════════════════════════════════════════"
 echo ""

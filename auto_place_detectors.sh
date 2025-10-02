@@ -75,17 +75,15 @@ fi
 
 echo ""
 
-# Step 2: Place detectors with correct offset
+# Step 2: Place detectors with AUTO DETECTION
 echo "════════════════════════════════════════════════════════════════════════════"
-echo -e "${YELLOW}Step 2/3: Placing smoke detectors...${NC}"
+echo -e "${YELLOW}Step 2/3: Placing smoke detectors (AUTO MODE)...${NC}"
 echo "════════════════════════════════════════════════════════════════════════════"
 echo ""
 
+# Use auto-detection for everything (units, layers, offset)
 python3 smoke_detector_placer.py "$CLEAN_FILE" \
-    --rooms-layer 00_VAV_ZONE \
-    --offset-x 300001 \
-    --offset-y 0 \
-    --no-pdf 2>&1 | grep -E "🔥|📁|🔍|📐|🏠|📍|💾|✅|📊|•"
+    --no-pdf 2>&1 | grep -E "🔥|📁|🔍|📐|🏠|📍|💾|✅|📊|•|Auto-detected"
 
 if [ ${PIPESTATUS[0]} -ne 0 ]; then
     echo ""
