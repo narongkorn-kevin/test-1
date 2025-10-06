@@ -1,3 +1,38 @@
-/RCP-FO10,11,12,16-AR-1.dxf
-/RCP-FO10,11,12,16-AR-1_clean.dxf
-/RCP-FO10,11,12,16-AR-1_with_detectors_FINAL.dxf
+# Web App temporary files
+uploads/
+outputs/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# DXF temporary files
+*_clean.dxf
+*_with_detectors.dxf
+*_preview.pdf
+
+# Keep final output as example
+!RCP-FO10,11,12,16-AR-1_with_detectors_FINAL.dxf
+!RCP-FO10,11,12,16-AR-1_clean.dxf

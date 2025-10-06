@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🔥 Smoke Detector Auto-Placer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            max-width: 600px;
+            width: 100%;
+            padding: 40px;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .header h1 {
+            font-size: 28px;
+            color: #333;
+            margin-bottom: 10px;
+        }
+
+        .header .emoji {
+            font-size: 48px;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            color: #666;
+            font-size: 14px;
+        }
+
+        .upload-area {
+            border: 3px dashed #667eea;
+            border-radius: 15px;
+            padding: 40px 20px;
+            text-align: center;
+            background: #f8f9ff;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin-bottom: 20px;
+        }
+
+        .upload-area:hover {
+            border-color: #764ba2;
+            background: #f0f2ff;
+        }
+
+        .upload-area.dragover {
+            border-color: #764ba2;
+            background: #e8ebff;
+            transform: scale(1.02);
+        }
+
+        .upload-icon {
+            font-size: 64px;
+            margin-bottom: 15px;
+        }
+
+        .upload-text {
+            color: #667eea;
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 10px;
+        }
+
+        .upload-hint {
+            color: #999;
+            font-size: 14px;
+        }
+
+        input[type="file"] {
+            display: none;
+        }
+
+        .file-info {
+            background: #f0f2ff;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            display: none;
+        }
+
+        .file-info.show {
+            display: block;
+        }
+
+        .file-name {
+            color: #333;
+            font-weight: 600;
+            margin-bottom: 5px;
+        }
+
+        .file-size {
+            color: #666;
+            font-size: 14px;
+        }
+
+        .btn {
+            width: 100%;
+            padding: 15px;
+            border: none;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .btn-primary:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-primary:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .btn-success {
+            background: #10b981;
+            color: white;
+            margin-top: 10px;
+        }
+
+        .btn-success:hover {
+            background: #059669;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(16, 185, 129, 0.4);
+        }
+
+        .progress-section {
+            display: none;
+            margin-top: 20px;
+        }
+
+        .progress-section.show {
+            display: block;
+        }
+
+        .progress-bar-container {
+            width: 100%;
+            height: 8px;
+            background: #e5e7eb;
+            border-radius: 10px;
+            overflow: hidden;
+            margin-bottom: 15px;
+        }
+
+        .progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+
+        .progress-text {
+            text-align: center;
+            color: #666;
+            font-size: 14px;
+            margin-bottom: 10px;
+        }
+
+        .result-section {
+            display: none;
+            margin-top: 20px;
+            padding: 20px;
+            background: #f0fdf4;
+            border-radius: 10px;
+            border: 2px solid #10b981;
+        }
+
+        .result-section.show {
+            display: block;
+        }
+
+        .result-icon {
+            text-align: center;
+            font-size: 48px;
+            margin-bottom: 15px;
+        }
+
+        .result-title {
+            text-align: center;
+            color: #059669;
+            font-size: 20px;
+            font-weight: 600;
+            margin-bottom: 15px;
+        }
+
+        .result-stats {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+        }
+
+        .stat-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid #e5e7eb;
+        }
+
+        .stat-item:last-child {
+            border-bottom: none;
+        }
+
+        .stat-label {
+            color: #666;
+        }
+
+        .stat-value {
+            color: #333;
+            font-weight: 600;
+        }
+
+        .error-section {
+            display: none;
+            margin-top: 20px;
+            padding: 20px;
+            background: #fef2f2;
+            border-radius: 10px;
+            border: 2px solid #ef4444;
+        }
+
+        .error-section.show {
+            display: block;
+        }
+
+        .error-icon {
+            text-align: center;
+            font-size: 48px;
+            margin-bottom: 15px;
+        }
+
+        .error-message {
+            color: #dc2626;
+            text-align: center;
+        }
+
+        .reset-btn {
+            background: #6b7280;
+            color: white;
+            margin-top: 10px;
+        }
+
+        .reset-btn:hover {
+            background: #4b5563;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .spinner {
+            display: inline-block;
+            animation: spin 1s linear infinite;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="emoji">🔥</div>
+            <h1>Smoke Detector Auto-Placer</h1>
+            <p>อัพโหลดไฟล์ DXF → ประมวลผลอัตโนมัติ → ดาวน์โหลดไฟล์</p>
+        </div>
+
+        <div class="upload-area" id="uploadArea">
+            <div class="upload-icon">📁</div>
+            <div class="upload-text">คลิกเพื่ออัพโหลดไฟล์ DXF</div>
+            <div class="upload-hint">หรือลากไฟล์มาวางที่นี่</div>
+            <input type="file" id="fileInput" accept=".dxf">
+        </div>
+
+        <div class="file-info" id="fileInfo">
+            <div class="file-name" id="fileName"></div>
+            <div class="file-size" id="fileSize"></div>
+        </div>
+
+        <button class="btn btn-primary" id="processBtn" disabled>
+            เริ่มประมวลผล
+        </button>
+
+        <div class="progress-section" id="progressSection">
+            <div class="progress-bar-container">
+                <div class="progress-bar" id="progressBar"></div>
+            </div>
+            <div class="progress-text" id="progressText">กำลังประมวลผล...</div>
+        </div>
+
+        <div class="result-section" id="resultSection">
+            <div class="result-icon">✅</div>
+            <div class="result-title">ประมวลผลเสร็จสมบูรณ์!</div>
+            <div class="result-stats" id="resultStats"></div>
+            <button class="btn btn-success" id="downloadBtn">
+                📥 ดาวน์โหลดไฟล์
+            </button>
+            <button class="btn reset-btn" id="resetBtn">
+                🔄 อัพโหลดไฟล์ใหม่
+            </button>
+        </div>
+
+        <div class="error-section" id="errorSection">
+            <div class="error-icon">❌</div>
+            <div class="error-message" id="errorMessage"></div>
+            <button class="btn reset-btn" id="errorResetBtn">
+                🔄 ลองใหม่
+            </button>
+        </div>
+    </div>
+
+    <script>
+        const uploadArea = document.getElementById('uploadArea');
+        const fileInput = document.getElementById('fileInput');
+        const fileInfo = document.getElementById('fileInfo');
+        const fileName = document.getElementById('fileName');
+        const fileSize = document.getElementById('fileSize');
+        const processBtn = document.getElementById('processBtn');
+        const progressSection = document.getElementById('progressSection');
+        const progressBar = document.getElementById('progressBar');
+        const progressText = document.getElementById('progressText');
+        const resultSection = document.getElementById('resultSection');
+        const resultStats = document.getElementById('resultStats');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const resetBtn = document.getElementById('resetBtn');
+        const errorSection = document.getElementById('errorSection');
+        const errorMessage = document.getElementById('errorMessage');
+        const errorResetBtn = document.getElementById('errorResetBtn');
+
+        let selectedFile = null;
+        let currentJobId = null;
+
+        // Click to upload
+        uploadArea.addEventListener('click', () => {
+            fileInput.click();
+        });
+
+        // Drag and drop
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadArea.classList.add('dragover');
+        });
+
+        uploadArea.addEventListener('dragleave', () => {
+            uploadArea.classList.remove('dragover');
+        });
+
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                handleFile(files[0]);
+            }
+        });
+
+        // File input change
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                handleFile(e.target.files[0]);
+            }
+        });
+
+        function handleFile(file) {
+            if (!file.name.toLowerCase().endsWith('.dxf')) {
+                alert('กรุณาเลือกไฟล์ .dxf เท่านั้น');
+                return;
+            }
+
+            selectedFile = file;
+            
+            // Show file info
+            fileName.textContent = `📄 ${file.name}`;
+            fileSize.textContent = `ขนาด: ${formatFileSize(file.size)}`;
+            fileInfo.classList.add('show');
+            
+            // Enable process button
+            processBtn.disabled = false;
+        }
+
+        function formatFileSize(bytes) {
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(2) + ' KB';
+            return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+        }
+
+        processBtn.addEventListener('click', async () => {
+            if (!selectedFile) return;
+
+            // Hide previous results
+            resultSection.classList.remove('show');
+            errorSection.classList.remove('show');
+            
+            // Show progress
+            progressSection.classList.add('show');
+            progressBar.style.width = '0%';
+            progressText.innerHTML = '<span class="spinner">⏳</span> กำลังอัพโหลด...';
+            
+            // Disable button
+            processBtn.disabled = true;
+
+            try {
+                // Upload file
+                const formData = new FormData();
+                formData.append('file', selectedFile);
+
+                const uploadResponse = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!uploadResponse.ok) {
+                    const error = await uploadResponse.json();
+                    throw new Error(error.error || 'อัพโหลดล้มเหลว');
+                }
+
+                const uploadData = await uploadResponse.json();
+                currentJobId = uploadData.job_id;
+
+                // Poll for status
+                pollStatus();
+
+            } catch (error) {
+                showError(error.message);
+                processBtn.disabled = false;
+                progressSection.classList.remove('show');
+            }
+        });
+
+        async function pollStatus() {
+            if (!currentJobId) return;
+
+            try {
+                const response = await fetch(`/status/${currentJobId}`);
+                
+                if (!response.ok) {
+                    throw new Error('ไม่สามารถตรวจสอบสถานะได้');
+                }
+
+                const status = await response.json();
+
+                // Update progress
+                progressBar.style.width = status.progress + '%';
+                progressText.innerHTML = `<span class="spinner">⏳</span> ${status.message}`;
+
+                if (status.status === 'completed') {
+                    showResult(status);
+                } else if (status.status === 'error') {
+                    showError(status.message);
+                } else {
+                    // Continue polling
+                    setTimeout(pollStatus, 500);
+                }
+
+            } catch (error) {
+                showError(error.message);
+            }
+        }
+
+        function showResult(status) {
+            progressSection.classList.remove('show');
+            
+            // Build stats HTML
+            const statsHTML = `
+                <div class="stat-item">
+                    <span class="stat-label">🏠 จำนวนห้อง:</span>
+                    <span class="stat-value">${status.total_rooms} ห้อง</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">🔥 จำนวน Detectors:</span>
+                    <span class="stat-value">${status.total_detectors} ตัว</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">📁 ไฟล์:</span>
+                    <span class="stat-value">${status.output_file}</span>
+                </div>
+            `;
+            
+            resultStats.innerHTML = statsHTML;
+            resultSection.classList.add('show');
+        }
+
+        function showError(message) {
+            progressSection.classList.remove('show');
+            errorMessage.textContent = message;
+            errorSection.classList.add('show');
+        }
+
+        downloadBtn.addEventListener('click', () => {
+            if (currentJobId) {
+                window.location.href = `/download/${currentJobId}`;
+            }
+        });
+
+        function reset() {
+            // Clean up server files
+            if (currentJobId) {
+                fetch(`/cleanup/${currentJobId}`, { method: 'POST' });
+            }
+
+            // Reset UI
+            selectedFile = null;
+            currentJobId = null;
+            fileInfo.classList.remove('show');
+            progressSection.classList.remove('show');
+            resultSection.classList.remove('show');
+            errorSection.classList.remove('show');
+            processBtn.disabled = true;
+            fileInput.value = '';
+        }
+
+        resetBtn.addEventListener('click', reset);
+        errorResetBtn.addEventListener('click', reset);
+    </script>
+</body>
+</html>
+
