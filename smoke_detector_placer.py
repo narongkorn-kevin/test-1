@@ -77,6 +77,10 @@ Examples:
                    help="X offset to shift detector positions (auto-detect if not specified)")
     p.add_argument("--offset-y", dest="offset_y", type=float, default=None,
                    help="Y offset to shift detector positions")
+    p.add_argument("--coverage-circles", action="store_true",
+                   help="Draw detector coverage radius circles in the output DXF")
+    p.add_argument("--coverage-radius", dest="coverage_radius", type=float, default=None,
+                   help="Custom coverage radius in meters (requires --coverage-circles)")
     return p.parse_args()
 
 
@@ -141,23 +145,133 @@ def auto_detect_offset(doc, rooms: List[Tuple[str, Polygon]], room_layers: List[
     msp = doc.modelspace()
     
     # Get room bounds
-    room_xs = []
-    room_ys = []
-    for _, poly in rooms:
+    room_xs: List[float] = []
+    room_ys: List[float] = []
+    room_polys = [poly for _, poly in rooms]
+    total_room_area = sum(poly.area for poly in room_polys)
+    
+    for poly in room_polys:
         bounds = poly.bounds
         room_xs.extend([bounds[0], bounds[2]])
         room_ys.extend([bounds[1], bounds[3]])
     
-    room_minx, room_maxx = min(room_xs), max(room_xs)
-    room_miny, room_maxy = min(room_ys), max(room_ys)
+    room_minx = min(room_xs)
+    room_maxx = max(room_xs)
+    room_miny = min(room_ys)
+    room_maxy = max(room_ys)
+    
+    # Use union of rooms to reduce influence of small outliers when computing bounds.
+    try:
+        merged = unary_union(room_polys)
+        if isinstance(merged, Polygon):
+            main_poly = merged
+        elif hasattr(merged, "geoms"):
+            polys = [g for g in merged.geoms if isinstance(g, Polygon)]
+            main_poly = max(polys, key=lambda p: p.area) if polys else None
+        else:
+            main_poly = None
+    except Exception:
+        main_poly = None
+    
+    if main_poly:
+        bounds = main_poly.bounds
+        room_minx, room_miny, room_maxx, room_maxy = bounds
+        total_room_area = max(main_poly.area, 1.0)
+    else:
+        total_room_area = max(total_room_area, 1.0)
+    
     room_centerx = (room_minx + room_maxx) / 2
     room_centery = (room_miny + room_maxy) / 2
-    
+    room_width = max(room_maxx - room_minx, 1.0)
+    room_height = max(room_maxy - room_miny, 1.0)
+
     # Priority list: architectural layers that typically define the building
     priority_keywords = ["WALL", "A-WALL", "I-WALL", "ARCH", "A-CLNG", "A-DOOR", "A-WIND"]
     
     # Convert room_layers to set for faster lookup
     room_layer_set = set(room_layers)
+    
+    # Try to find an outline layer that closely matches room dimensions.
+    best_outline = None
+    best_outline_score = float("inf")
+    tolerance_ratio = 0.15  # allow 15% mismatch in width/height
+    room_area = max(total_room_area, 1.0)
+    
+    def evaluate_outline(layer_name: str, bounds, area: float):
+        nonlocal best_outline, best_outline_score
+        minx, miny, maxx, maxy = bounds
+        width = max(maxx - minx, 1.0)
+        height = max(maxy - miny, 1.0)
+        width_ratio = width / room_width
+        height_ratio = height / room_height
+        if not (1 - tolerance_ratio <= width_ratio <= 1 + tolerance_ratio):
+            return
+        if not (1 - tolerance_ratio <= height_ratio <= 1 + tolerance_ratio):
+            return
+        area_ratio = area / room_area if area > 0 else 1.0
+        # Score based on closeness of width/height plus a small penalty for area mismatch.
+        score = abs(1 - width_ratio) + abs(1 - height_ratio) + abs(1 - area_ratio) * 0.5
+        # Reward layers that contain architectural keywords so they win ties naturally.
+        for keyword in priority_keywords:
+            if keyword in layer_name:
+                score *= 0.8
+                break
+        if score < best_outline_score:
+            best_outline_score = score
+            best_outline = {
+                "layer": layer_name,
+                "bounds": bounds,
+                "offset_x": minx - room_minx,
+                "offset_y": miny - room_miny,
+            }
+    
+    # Inspect closed polylines first—they often define usable outlines.
+    for e in msp.query("LWPOLYLINE"):
+        try:
+            layer = e.dxf.layer.upper()
+            if layer in room_layer_set or not e.closed:
+                continue
+            pts = [(v[0], v[1]) for v in e.get_points()]
+            if len(pts) < 3:
+                continue
+            poly = Polygon(pts)
+            if not (poly.is_valid and poly.area > 0):
+                continue
+            evaluate_outline(layer, poly.bounds, poly.area)
+        except Exception:
+            continue
+    
+    for e in msp.query("POLYLINE"):
+        try:
+            layer = e.dxf.layer.upper()
+            if layer in room_layer_set or not e.is_closed:
+                continue
+            pts = [(v.dxf.location.x, v.dxf.location.y) for v in e.vertices]
+            if len(pts) < 3:
+                continue
+            poly = Polygon(pts)
+            if not (poly.is_valid and poly.area > 0):
+                continue
+            evaluate_outline(layer, poly.bounds, poly.area)
+        except Exception:
+            continue
+    
+    if best_outline:
+        offset_x = best_outline["offset_x"]
+        offset_y = best_outline["offset_y"]
+        offset_magnitude = (offset_x ** 2 + offset_y ** 2) ** 0.5
+        room_size = max(room_width, room_height)
+        print("")
+        print("🔍 Auto-detected drawing offset via outline match:")
+        print(f"   Reference layer: {best_outline['layer']}")
+        print(f"   Room bounds: X [{room_minx:.0f}, {room_maxx:.0f}]  Y [{room_miny:.0f}, {room_maxy:.0f}]")
+        minx, miny, maxx, maxy = best_outline["bounds"]
+        print(f"   Layer bounds: X [{minx:.0f}, {maxx:.0f}]  Y [{miny:.0f}, {maxy:.0f}]")
+        print(f"   Applying offset: ({offset_x:.0f}, {offset_y:.0f})")
+        if offset_magnitude < room_size * 0.01:
+            print("   Detected offset is very small; rooms likely already aligned.")
+            return 0.0, 0.0
+        return offset_x, offset_y
     
     # First, try to find architectural layers
     from collections import defaultdict
@@ -188,6 +302,35 @@ def auto_detect_offset(doc, rooms: List[Tuple[str, Polygon]], room_layers: List[
     priority_xs = []
     priority_ys = []
     priority_layer_found = None
+    
+    # Evaluate layer bounding boxes as potential outlines (helps when outline is made of lines)
+    for layer, data in layer_coords.items():
+        xs, ys = data["xs"], data["ys"]
+        if layer in room_layer_set or data["count"] < 5 or len(xs) < 4 or len(ys) < 4:
+            continue
+        minx, maxx = min(xs), max(xs)
+        miny, maxy = min(ys), max(ys)
+        width = max(maxx - minx, 1.0)
+        height = max(maxy - miny, 1.0)
+        approx_area = width * height
+        evaluate_outline(layer, (minx, miny, maxx, maxy), approx_area)
+    
+    if best_outline:
+        offset_x = best_outline["offset_x"]
+        offset_y = best_outline["offset_y"]
+        offset_magnitude = (offset_x ** 2 + offset_y ** 2) ** 0.5
+        room_size = max(room_width, room_height)
+        print("")
+        print("🔍 Auto-detected drawing offset via layer extents:")
+        print(f"   Reference layer: {best_outline['layer']}")
+        print(f"   Room bounds: X [{room_minx:.0f}, {room_maxx:.0f}]  Y [{room_miny:.0f}, {room_maxy:.0f}]")
+        minx, miny, maxx, maxy = best_outline["bounds"]
+        print(f"   Layer bounds: X [{minx:.0f}, {maxx:.0f}]  Y [{miny:.0f}, {maxy:.0f}]")
+        print(f"   Applying offset: ({offset_x:.0f}, {offset_y:.0f})")
+        if offset_magnitude < room_size * 0.01:
+            print("   Detected offset is very small; rooms likely already aligned.")
+            return 0.0, 0.0
+        return offset_x, offset_y
     
     # Try priority keywords first
     for keyword in priority_keywords:
@@ -251,6 +394,79 @@ def unit_scale(units: str) -> float:
     if units == "in":
         return 1.0 / 0.0254
     return 1.0
+
+
+def create_building_bounds(doc) -> Polygon:
+    """Create building bounds using union of all room polygons (most accurate)"""
+    msp = doc.modelspace()
+    room_polygons = []
+    
+    # Collect all closed polylines (rooms)
+    for entity in msp:
+        try:
+            if entity.dxftype() == "LWPOLYLINE" and entity.closed:
+                points = entity.get_points()
+                if points and len(points) >= 3:
+                    try:
+                        poly = Polygon([(pt[0], pt[1]) for pt in points])
+                        if poly.is_valid and poly.area > 0:
+                            room_polygons.append(poly)
+                    except Exception:
+                        continue
+            elif entity.dxftype() == "POLYLINE" and entity.is_closed:
+                points = [(v.dxf.location.x, v.dxf.location.y) for v in entity.vertices]
+                if points and len(points) >= 3:
+                    try:
+                        poly = Polygon(points)
+                        if poly.is_valid and poly.area > 0:
+                            room_polygons.append(poly)
+                    except Exception:
+                        continue
+        except Exception:
+            continue
+    
+    if not room_polygons:
+        return None
+    
+    # Create union of all room polygons to get the actual building shape
+    try:
+        from shapely.ops import unary_union
+        building_union = unary_union(room_polygons)
+        
+        # If union is a single polygon, use it directly
+        if isinstance(building_union, Polygon):
+            return building_union
+        # If union is a MultiPolygon, get the largest one
+        elif hasattr(building_union, 'geoms'):
+            largest_poly = max(building_union.geoms, key=lambda p: p.area)
+            return largest_poly
+        else:
+            # Fallback to bounding box
+            bounds = building_union.bounds
+            return Polygon([
+                (bounds[0], bounds[1]),
+                (bounds[2], bounds[1]),
+                (bounds[2], bounds[3]),
+                (bounds[0], bounds[3])
+            ])
+    except Exception:
+        # Fallback to simple bounding box
+        all_xs = []
+        all_ys = []
+        for poly in room_polygons:
+            bounds = poly.bounds
+            all_xs.extend([bounds[0], bounds[2]])
+            all_ys.extend([bounds[1], bounds[3]])
+        
+        minx, maxx = min(all_xs), max(all_xs)
+        miny, maxy = min(all_ys), max(all_ys)
+        
+        return Polygon([
+            (minx, miny),
+            (maxx, miny),
+            (maxx, maxy),
+            (minx, maxy)
+        ])
 
 
 def dxf_to_room_polygons(doc, layers: List[str]) -> List[Tuple[str, Polygon]]:
@@ -369,6 +585,77 @@ def compute_spacing(standard: str, custom_spacing: float | None):
     return 9.1, "Default spacing used (NFPA-like)."
 
 
+def compute_default_coverage_radius(standard: str, spacing_m: float) -> float:
+    """Return default detector coverage radius in meters based on standard."""
+    if spacing_m <= 0:
+        return 0.0
+    if standard == "NFPA72":
+        # NFPA 72: 30 ft (9.1 m) spacing corresponds to ~21 ft (6.4 m) coverage radius.
+        ratio = 6.4 / 9.1
+        return spacing_m * ratio
+    if standard == "EN54-14":
+        # EN 54-14: Spacing 8.66 m (hex grid) ensures ≤7.5 m to nearest detector.
+        ratio = 7.5 / 8.66
+        return spacing_m * ratio
+    return spacing_m * 0.5
+
+
+def fill_coverage_gaps(points_by_room: List[Dict], coverage_radius: float, target_polygon: Polygon) -> List[Tuple[float, float]]:
+    """Add detectors in uncovered zones to maintain coverage continuity."""
+    if coverage_radius is None or coverage_radius <= 0:
+        return []
+    if target_polygon is None:
+        return []
+    
+    all_points = [(x, y) for room in points_by_room for (x, y) in room["points"]]
+    if not all_points:
+        return []
+    
+    try:
+        coverage_shapes = [Point(x, y).buffer(coverage_radius, resolution=12) for (x, y) in all_points]
+        coverage_union = unary_union(coverage_shapes)
+        uncovered = target_polygon.difference(coverage_union)
+    except Exception:
+        return []
+    
+    min_gap_area = math.pi * (coverage_radius ** 2) * 0.05
+    added_points: List[Tuple[float, float]] = []
+    
+    while not uncovered.is_empty:
+        if uncovered.geom_type == "Polygon":
+            geometries = [uncovered]
+        elif hasattr(uncovered, "geoms"):
+            geometries = [g for g in uncovered.geoms if g.area > 0]
+        else:
+            break
+        
+        if not geometries:
+            break
+        
+        largest = max(geometries, key=lambda g: g.area)
+        if largest.area < min_gap_area:
+            break
+        
+        candidate_point = largest.representative_point()
+        if not target_polygon.contains(candidate_point):
+            candidate_point = largest.centroid
+        
+        x, y = candidate_point.x, candidate_point.y
+        min_dist = min(math.hypot(x - px, y - py) for (px, py) in all_points)
+        if min_dist < coverage_radius * 0.6:
+            coverage_union = coverage_union.union(largest)
+            uncovered = target_polygon.difference(coverage_union)
+            continue
+        
+        added_points.append((x, y))
+        all_points.append((x, y))
+        new_shape = Point(x, y).buffer(coverage_radius, resolution=12)
+        coverage_union = coverage_union.union(new_shape)
+        uncovered = target_polygon.difference(coverage_union)
+    
+    return added_points
+
+
 def offset_interior(poly: Polygon, margin: float) -> Polygon:
     inset = poly.buffer(-margin, join_style=2)
     if inset.is_empty:
@@ -379,7 +666,7 @@ def offset_interior(poly: Polygon, margin: float) -> Polygon:
     return inset
 
 
-def place_detectors_in_room(room_poly: Polygon, spacing_units: float, margin_units: float, grid_type: str):
+def place_detectors_in_room(room_poly: Polygon, spacing_units: float, margin_units: float, grid_type: str, building_bounds: Polygon = None):
     if room_poly.area <= 0:
         return []
     inner = offset_interior(room_poly, margin_units)
@@ -393,10 +680,23 @@ def place_detectors_in_room(room_poly: Polygon, spacing_units: float, margin_uni
         c = inner.centroid
         if inner.contains(c):
             pts = [(c.x, c.y)]
+    
+    # Filter points that are outside building bounds if provided
+    if building_bounds and pts:
+        filtered_pts = []
+        for (x, y) in pts:
+            pt = Point(x, y)
+            # Moderate filtering: keep points that are inside building bounds
+            # Allow points close to boundary (within 0.5 meter tolerance)
+            if building_bounds.contains(pt) or building_bounds.distance(pt) <= 0.5:
+                filtered_pts.append((x, y))
+        pts = filtered_pts
+    
     return pts
 
 
-def write_output_dxf(src_doc, out_path: Path, points_by_room: List[Dict], offset_x: float = 0.0, offset_y: float = 0.0):
+def write_output_dxf(src_doc, out_path: Path, points_by_room: List[Dict], offset_x: float = 0.0, offset_y: float = 0.0,
+                     coverage_radius: float | None = None):
     doc = src_doc
     msp = doc.modelspace()
 
@@ -422,6 +722,18 @@ def write_output_dxf(src_doc, out_path: Path, points_by_room: List[Dict], offset
             doc.layers.add(layer_name)
         except Exception:
             pass
+    
+    coverage_layer_name = "SMOKE_COVERAGE"
+    if coverage_radius and coverage_radius > 0:
+        try:
+            if coverage_layer_name not in doc.layers:
+                # Use indexed green (ACI color 3) for visibility
+                doc.layers.add(name=coverage_layer_name, color=3)
+        except Exception:
+            try:
+                doc.layers.add(coverage_layer_name)
+            except Exception:
+                pass
 
     blk_name = "SMOKE_DET_SYMBOL"
     if blk_name not in doc.blocks:
@@ -439,6 +751,9 @@ def write_output_dxf(src_doc, out_path: Path, points_by_room: List[Dict], offset
             adjusted_x = x + offset_x
             adjusted_y = y + offset_y
             msp.add_blockref(blk_name, insert=(adjusted_x, adjusted_y), dxfattribs={"layer": layer_name})
+            if coverage_radius and coverage_radius > 0:
+                msp.add_circle(center=(adjusted_x, adjusted_y), radius=coverage_radius,
+                               dxfattribs={"layer": coverage_layer_name})
             total_placed += 1
 
     doc.saveas(out_path.as_posix())
@@ -630,6 +945,22 @@ def main():
     spacing_units = spacing_m * scale
     margin_units = args.margin * scale
 
+    default_coverage_m = compute_default_coverage_radius(args.standard, spacing_m)
+    coverage_radius_m = default_coverage_m
+    if args.coverage_radius and args.coverage_radius > 0:
+        coverage_radius_m = args.coverage_radius
+
+    coverage_radius_units_effective = coverage_radius_m * scale if coverage_radius_m else None
+    coverage_radius_units_draw = coverage_radius_units_effective if args.coverage_circles else None
+
+    if args.coverage_circles:
+        if args.coverage_radius and args.coverage_radius > 0:
+            print(f"🟢 Coverage circles enabled (radius {coverage_radius_m:.2f} m)")
+        else:
+            print(f"🟢 Coverage circles enabled (default radius {coverage_radius_m:.2f} m)")
+    elif args.coverage_radius:
+        print("⚠️  Coverage radius specified but coverage circles disabled; using it for coverage checks only.")
+
     rooms = dxf_to_room_polygons(doc, room_layers)
     if not rooms:
         print("❌ No closed room polygons found on specified layers.", file=sys.stderr)
@@ -641,6 +972,11 @@ def main():
         names_map = map_room_names(doc, [p for _, p in rooms], args.room_name_layer.upper())
 
     print(f"🏠 Found {len(rooms)} rooms")
+    
+    # Create building bounds for filtering
+    building_bounds = create_building_bounds(doc)
+    if building_bounds:
+        print(f"🏢 Created building bounds for filtering")
     
     # Auto-detect or use specified offset
     if args.offset_x is not None and args.offset_y is not None:
@@ -655,7 +991,7 @@ def main():
         area_m2 = poly.area / (scale ** 2)
         if area_m2 < args.min_area:
             continue
-        pts = place_detectors_in_room(poly, spacing_units, margin_units, args.grid)
+        pts = place_detectors_in_room(poly, spacing_units, margin_units, args.grid, building_bounds)
         points_by_room.append({
             "index": i,
             "layer": layer,
@@ -663,11 +999,24 @@ def main():
             "points": pts,
         })
 
+    extra_points = []
+    if coverage_radius_units_effective and coverage_radius_units_effective > 0 and building_bounds:
+        extra_points = fill_coverage_gaps(points_by_room, coverage_radius_units_effective, building_bounds)
+        if extra_points:
+            print(f"➕ Added {len(extra_points)} additional detector(s) to cover uncovered zones")
+            points_by_room.append({
+                "index": len(points_by_room),
+                "layer": "COVERAGE_FILL",
+                "name": "Coverage Gap",
+                "points": extra_points,
+            })
+    
     total = sum(len(r["points"]) for r in points_by_room)
+    rooms_processed = sum(1 for r in points_by_room if r.get("layer") != "COVERAGE_FILL")
     
     # Write output DXF with offset
     print(f"💾 Saving DXF with detectors: {out_path}")
-    total_placed = write_output_dxf(doc, out_path, points_by_room, offset_x, offset_y)
+    total_placed = write_output_dxf(doc, out_path, points_by_room, offset_x, offset_y, coverage_radius_units_draw)
     
     if total_placed != total:
         print(f"⚠️  Warning: Expected {total} but placed {total_placed} detectors")
@@ -689,9 +1038,17 @@ def main():
     print("=" * 60)
     print(f"📊 Summary:")
     print(f"   • Rooms found: {len(rooms)}")
-    print(f"   • Rooms processed (≥ {args.min_area} m²): {len(points_by_room)}")
+    print(f"   • Rooms processed (≥ {args.min_area} m²): {rooms_processed}")
     print(f"   • Total detectors placed: {total}")
-    print(f"   • Average detectors per room: {total/len(points_by_room):.1f}" if points_by_room else "")
+    if rooms_processed:
+        print(f"   • Average detectors per room: {total/rooms_processed:.1f}")
+    if coverage_radius_units_effective:
+        if args.coverage_circles:
+            print(f"   • Coverage circles drawn: {coverage_radius_m:.2f} m radius")
+        else:
+            print(f"   • Coverage radius for validation: {coverage_radius_m:.2f} m")
+    if extra_points:
+        print(f"   • Coverage gap fills added: {len(extra_points)}")
     print("=" * 60)
 
 

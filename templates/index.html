@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🔥 Smoke Detector Auto-Placer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #ff6b6b, #ee5a24);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+
+        .content {
+            padding: 40px;
+        }
+
+        .upload-area {
+            border: 3px dashed #ddd;
+            border-radius: 15px;
+            padding: 40px;
+            text-align: center;
+            margin-bottom: 30px;
+            transition: all 0.3s ease;
+            cursor: pointer;
+        }
+
+        .upload-area:hover {
+            border-color: #ff6b6b;
+            background-color: #fff5f5;
+        }
+
+        .upload-area.dragover {
+            border-color: #ff6b6b;
+            background-color: #fff5f5;
+            transform: scale(1.02);
+        }
+
+        .upload-icon {
+            font-size: 4em;
+            color: #ddd;
+            margin-bottom: 20px;
+        }
+
+        .upload-text {
+            font-size: 1.2em;
+            color: #666;
+            margin-bottom: 10px;
+        }
+
+        .upload-hint {
+            color: #999;
+            font-size: 0.9em;
+        }
+
+        .file-input {
+            display: none;
+        }
+
+        .options {
+            background: #f8f9fa;
+            border-radius: 15px;
+            padding: 25px;
+            margin-bottom: 30px;
+        }
+
+        .options h3 {
+            color: #333;
+            margin-bottom: 20px;
+            font-size: 1.3em;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #555;
+        }
+
+        .toggle-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 20px;
+            background: white;
+            border: 2px solid #ddd;
+            border-radius: 12px;
+            padding: 14px 18px;
+        }
+
+        .toggle-row label {
+            margin-bottom: 4px;
+        }
+
+        .toggle-row small {
+            color: #777;
+            font-weight: 400;
+        }
+
+        .coverage-hint {
+            font-size: 0.9em;
+        }
+
+        .form-group select,
+        .form-group input {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            font-size: 1em;
+            transition: border-color 0.3s ease;
+        }
+
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 56px;
+            height: 30px;
+        }
+
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            transition: .4s;
+            border-radius: 30px;
+        }
+
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 24px;
+            width: 24px;
+            left: 3px;
+            bottom: 3px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+
+        input:checked + .slider {
+            background-color: #00b894;
+        }
+
+        input:focus + .slider {
+            box-shadow: 0 0 1px #00b894;
+        }
+
+        input:checked + .slider:before {
+            transform: translateX(26px);
+        }
+
+        .slider.round {
+            border-radius: 30px;
+        }
+
+        .form-group select:focus,
+        .form-group input:focus {
+            outline: none;
+            border-color: #ff6b6b;
+        }
+
+        .btn {
+            background: linear-gradient(135deg, #ff6b6b, #ee5a24);
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 10px;
+            font-size: 1.1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            width: 100%;
+            margin-bottom: 15px;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(255, 107, 107, 0.3);
+        }
+
+        .btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        .btn-secondary {
+            background: linear-gradient(135deg, #74b9ff, #0984e3);
+        }
+
+        .btn-secondary:hover {
+            box-shadow: 0 10px 20px rgba(116, 185, 255, 0.3);
+        }
+
+        .progress {
+            display: none;
+            background: #f0f0f0;
+            border-radius: 10px;
+            overflow: hidden;
+            margin: 20px 0;
+        }
+
+        .progress-bar {
+            background: linear-gradient(135deg, #ff6b6b, #ee5a24);
+            height: 20px;
+            width: 0%;
+            transition: width 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: 600;
+        }
+
+        .result {
+            display: none;
+            background: #d4edda;
+            border: 1px solid #c3e6cb;
+            border-radius: 10px;
+            padding: 20px;
+            margin-top: 20px;
+        }
+
+        .result.error {
+            background: #f8d7da;
+            border-color: #f5c6cb;
+            color: #721c24;
+        }
+
+        .result.success {
+            background: #d4edda;
+            border-color: #c3e6cb;
+            color: #155724;
+        }
+
+        .download-btn {
+            background: linear-gradient(135deg, #00b894, #00a085);
+            color: white;
+            text-decoration: none;
+            padding: 12px 25px;
+            border-radius: 8px;
+            display: inline-block;
+            margin-top: 15px;
+            font-weight: 600;
+            transition: all 0.3s ease;
+        }
+
+        .download-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 16px rgba(0, 184, 148, 0.3);
+            text-decoration: none;
+            color: white;
+        }
+
+        .inspection-result {
+            background: #e3f2fd;
+            border: 1px solid #bbdefb;
+            border-radius: 10px;
+            padding: 20px;
+            margin-top: 20px;
+            font-family: monospace;
+            white-space: pre-wrap;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #ff6b6b;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 10px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .footer {
+            text-align: center;
+            padding: 20px;
+            color: #666;
+            font-size: 0.9em;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔥 Smoke Detector Auto-Placer</h1>
+            <p>วางตำแหน่ง Smoke Detector อัตโนมัติตามมาตรฐานสากล</p>
+        </div>
+
+        <div class="content">
+            <div class="upload-area" id="uploadArea">
+                <div class="upload-icon">📁</div>
+                <div class="upload-text">ลากไฟล์ DXF มาวางที่นี่ หรือคลิกเพื่อเลือกไฟล์</div>
+                <div class="upload-hint">รองรับไฟล์ .dxf เท่านั้น</div>
+                <input type="file" id="fileInput" class="file-input" accept=".dxf">
+            </div>
+
+            <div class="options">
+                <h3>⚙️ ตัวเลือกการประมวลผล</h3>
+                
+                <div class="form-group">
+                    <label for="standard">มาตรฐาน:</label>
+                    <select id="standard" name="standard">
+                        <option value="NFPA72">NFPA 72 (ระยะห่าง ~9.1m)</option>
+                        <option value="EN54-14">EN 54-14 (ระยะห่าง ~8.66m)</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="grid_type">รูปแบบการจัดวาง:</label>
+                    <select id="grid_type" name="grid_type">
+                        <option value="square">สี่เหลี่ยม (Square Grid)</option>
+                        <option value="hex">หกเหลี่ยม (Hex Grid) - ประหยัด ~13%</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="spacing">ระยะห่าง (เมตร):</label>
+                    <input type="number" id="spacing" name="spacing" value="9.1" step="0.1" min="1" max="20">
+                </div>
+
+                <div class="form-group">
+                    <div class="toggle-row">
+                        <div>
+                            <label for="coverageToggle">แสดงรัศมีครอบคลุมของ Detector</label>
+                            <small class="coverage-hint">วาดวงกลมรัศมีครึ่งหนึ่งของระยะห่าง หรือกำหนดเอง</small>
+                        </div>
+                        <label class="switch">
+                            <input type="checkbox" id="coverageToggle" name="coverage">
+                            <span class="slider round"></span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="form-group" id="coverageRadiusGroup" style="display: none;">
+                    <label for="coverageRadius">รัศมีครอบคลุม (เมตร):</label>
+                    <input type="number" id="coverageRadius" name="coverage_radius" step="0.1" min="0" placeholder="เว้นว่างเพื่อใช้ค่ามาตรฐาน">
+                </div>
+            </div>
+
+            <button class="btn" id="processBtn" onclick="processFile()">
+                🚀 เริ่มประมวลผล
+            </button>
+
+            <button class="btn btn-secondary" id="inspectBtn" onclick="inspectFile()">
+                🔍 ตรวจสอบไฟล์
+            </button>
+
+            <div class="progress" id="progress">
+                <div class="progress-bar" id="progressBar">0%</div>
+            </div>
+
+            <div class="result" id="result"></div>
+            <div class="inspection-result" id="inspectionResult" style="display: none;"></div>
+        </div>
+
+        <div class="footer">
+            <p>Made with ❤️ for Fire Safety Engineers</p>
+        </div>
+    </div>
+
+    <script>
+        const uploadArea = document.getElementById('uploadArea');
+        const fileInput = document.getElementById('fileInput');
+        const processBtn = document.getElementById('processBtn');
+        const inspectBtn = document.getElementById('inspectBtn');
+        const progress = document.getElementById('progress');
+        const progressBar = document.getElementById('progressBar');
+       const result = document.getElementById('result');
+       const inspectionResult = document.getElementById('inspectionResult');
+        const coverageToggle = document.getElementById('coverageToggle');
+        const coverageRadiusGroup = document.getElementById('coverageRadiusGroup');
+        const coverageRadiusInput = document.getElementById('coverageRadius');
+
+        let selectedFile = null;
+
+        // File upload handling
+        uploadArea.addEventListener('click', () => fileInput.click());
+        uploadArea.addEventListener('dragover', handleDragOver);
+        uploadArea.addEventListener('dragleave', handleDragLeave);
+        uploadArea.addEventListener('drop', handleDrop);
+       fileInput.addEventListener('change', handleFileSelect);
+        coverageToggle.addEventListener('change', handleCoverageToggle);
+
+        function handleDragOver(e) {
+            e.preventDefault();
+            uploadArea.classList.add('dragover');
+        }
+
+        function handleDragLeave(e) {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+        }
+
+        function handleDrop(e) {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                handleFile(files[0]);
+            }
+        }
+
+        function handleFileSelect(e) {
+            const files = e.target.files;
+            if (files.length > 0) {
+                handleFile(files[0]);
+            }
+        }
+
+        function handleFile(file) {
+            if (file.name.toLowerCase().endsWith('.dxf')) {
+                selectedFile = file;
+                uploadArea.innerHTML = `
+                    <div class="upload-icon">✅</div>
+                    <div class="upload-text">ไฟล์ที่เลือก: ${file.name}</div>
+                    <div class="upload-hint">คลิกเพื่อเปลี่ยนไฟล์</div>
+                `;
+                result.style.display = 'none';
+                inspectionResult.style.display = 'none';
+            } else {
+                alert('กรุณาเลือกไฟล์ DXF เท่านั้น');
+            }
+        }
+
+        function showProgress() {
+            progress.style.display = 'block';
+            progressBar.style.width = '0%';
+            progressBar.textContent = '0%';
+            
+            // Simulate progress
+            let width = 0;
+            const interval = setInterval(() => {
+                width += Math.random() * 15;
+                if (width > 90) width = 90;
+                progressBar.style.width = width + '%';
+                progressBar.textContent = Math.round(width) + '%';
+            }, 200);
+            
+            return interval;
+        }
+
+        function hideProgress(interval) {
+            clearInterval(interval);
+            progressBar.style.width = '100%';
+            progressBar.textContent = '100%';
+            setTimeout(() => {
+                progress.style.display = 'none';
+            }, 500);
+        }
+
+        function showResult(message, isSuccess = true, downloadUrl = null) {
+            result.className = `result ${isSuccess ? 'success' : 'error'}`;
+            result.innerHTML = message;
+            if (downloadUrl) {
+                result.innerHTML += `<br><a href="${downloadUrl}" class="download-btn">📥 ดาวน์โหลดไฟล์ผลลัพธ์</a>`;
+            }
+            result.style.display = 'block';
+        }
+
+        async function processFile() {
+            if (!selectedFile) {
+                alert('กรุณาเลือกไฟล์ DXF ก่อน');
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('file', selectedFile);
+            formData.append('standard', document.getElementById('standard').value);
+            formData.append('grid_type', document.getElementById('grid_type').value);
+            formData.append('spacing', document.getElementById('spacing').value);
+            formData.append('coverage', document.getElementById('coverageToggle').checked ? 'on' : 'off');
+            if (coverageRadiusInput.value.trim()) {
+                formData.append('coverage_radius', coverageRadiusInput.value.trim());
+            }
+
+            processBtn.disabled = true;
+            processBtn.innerHTML = '<span class="loading"></span>กำลังประมวลผล...';
+            
+            const progressInterval = showProgress();
+
+            try {
+                const response = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+                hideProgress(progressInterval);
+
+                if (data.success) {
+                    showResult(data.message, true, data.download_url);
+                } else {
+                    showResult(data.message, false);
+                }
+            } catch (error) {
+                hideProgress(progressInterval);
+                showResult('เกิดข้อผิดพลาด: ' + error.message, false);
+            } finally {
+                processBtn.disabled = false;
+                processBtn.innerHTML = '🚀 เริ่มประมวลผล';
+            }
+        }
+
+        async function inspectFile() {
+            if (!selectedFile) {
+                alert('กรุณาเลือกไฟล์ DXF ก่อน');
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('file', selectedFile);
+
+            inspectBtn.disabled = true;
+            inspectBtn.innerHTML = '<span class="loading"></span>กำลังตรวจสอบ...';
+
+            try {
+                const response = await fetch('/inspect', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    inspectionResult.textContent = data.inspection;
+                    inspectionResult.style.display = 'block';
+                } else {
+                    showResult(data.message, false);
+                }
+            } catch (error) {
+                showResult('เกิดข้อผิดพลาด: ' + error.message, false);
+            } finally {
+                inspectBtn.disabled = false;
+                inspectBtn.innerHTML = '🔍 ตรวจสอบไฟล์';
+            }
+        }
+    </script>
+</body>
+</html>
+        function handleCoverageToggle() {
+            if (coverageToggle.checked) {
+                coverageRadiusGroup.style.display = 'block';
+            } else {
+                coverageRadiusGroup.style.display = 'none';
+                coverageRadiusInput.value = '';
+            }
+        }
