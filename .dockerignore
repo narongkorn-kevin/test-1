@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.env
+.venv/
+venv/
+
+# OS
+.DS_Store
+
+# VCS
+.git
+.gitignore
+
+# App data (mounted as volumes in compose or created at runtime)
+uploads/
+outputs/
+
+# Cache and logs
+*.log
+.cache/
+
+# Node/Front-end (if any)
+node_modules/
+
+# IDE
+.vscode/
+.idea/

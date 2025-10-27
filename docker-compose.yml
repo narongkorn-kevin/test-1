@@ -1,0 +1,14 @@
+version: "3.9"
+services:
+  app:
+    build: .
+    image: smoke-detector-placer:latest
+    container_name: smoke-detector-placer
+    ports:
+      - "8080:8080"
+    environment:
+      - MPLBACKEND=Agg
+    volumes:
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+    restart: unless-stopped
