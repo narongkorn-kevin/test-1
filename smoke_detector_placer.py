@@ -11,7 +11,7 @@ import argparse
 import math
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional, Union
 
 import ezdxf
 import numpy as np
@@ -575,7 +575,7 @@ def square_grid_points_in_poly(poly: Polygon, spacing: float):
     return pts
 
 
-def compute_spacing(standard: str, custom_spacing: float | None):
+def compute_spacing(standard: str, custom_spacing: Optional[float]):
     if custom_spacing and custom_spacing > 0:
         return float(custom_spacing), "CUSTOM spacing provided by user."
     if standard == "NFPA72":
@@ -666,12 +666,578 @@ def offset_interior(poly: Polygon, margin: float) -> Polygon:
     return inset
 
 
-def place_detectors_in_room(room_poly: Polygon, spacing_units: float, margin_units: float, grid_type: str, building_bounds: Polygon = None):
+def is_hollow_polygon(poly: Polygon, msp, room_layer_set: set, min_area_units: float, max_area_units: float) -> bool:
+    """
+    Check if a polygon is "hollow" (empty inside) - meaning it's likely a column.
+    A hollow polygon has:
+    1. Small rectangular/square shape
+    2. No significant entities inside (no grid, no patterns, no other polygons)
+    
+    Returns True if polygon appears to be a hollow column.
+    """
+    try:
+        bounds = poly.bounds
+        width = bounds[2] - bounds[0]
+        height = bounds[3] - bounds[1]
+        if min(width, height) <= 0:
+            return False
+        
+        # Must be roughly square/rectangular
+        aspect_ratio = max(width, height) / min(width, height)
+        if aspect_ratio > 6.0:
+            return False
+        
+        # Must be in column size range
+        if not (min_area_units <= poly.area <= max_area_units):
+            return False
+        
+        # Check if there are entities inside the polygon
+        # If there are many entities inside, it's probably not a hollow column
+        entities_inside = 0
+        entities_inside_area = 0.0
+        
+        # Sample points inside the polygon to check for entities
+        centroid = poly.centroid
+        sample_points = [
+            centroid,
+            Point(bounds[0] + width * 0.25, bounds[1] + height * 0.25),
+            Point(bounds[0] + width * 0.75, bounds[1] + height * 0.25),
+            Point(bounds[0] + width * 0.25, bounds[1] + height * 0.75),
+            Point(bounds[0] + width * 0.75, bounds[1] + height * 0.75),
+        ]
+        
+        # Check for entities that are inside or intersect the polygon
+        for entity in msp:
+            try:
+                layer = entity.dxf.layer.upper()
+                if layer in room_layer_set:
+                    continue
+                
+                # Check if entity is inside the polygon
+                entity_inside = False
+                entity_area = 0.0
+                
+                if entity.dxftype() in ("LWPOLYLINE", "POLYLINE"):
+                    try:
+                        if entity.dxftype() == "LWPOLYLINE":
+                            if entity.closed:
+                                pts = [(v[0], v[1]) for v in entity.get_points()]
+                                if len(pts) >= 3:
+                                    entity_poly = Polygon(pts)
+                                    if entity_poly.is_valid:
+                                        entity_area = entity_poly.area
+                                        # Check if entity polygon is inside the column polygon
+                                        if poly.contains(entity_poly.centroid):
+                                            entity_inside = True
+                        elif entity.dxftype() == "POLYLINE":
+                            if entity.is_closed:
+                                pts = [(v.dxf.location.x, v.dxf.location.y) for v in entity.vertices]
+                                if len(pts) >= 3:
+                                    entity_poly = Polygon(pts)
+                                    if entity_poly.is_valid:
+                                        entity_area = entity_poly.area
+                                        if poly.contains(entity_poly.centroid):
+                                            entity_inside = True
+                    except Exception:
+                        pass
+                elif entity.dxftype() in ("LINE", "CIRCLE", "ARC"):
+                    try:
+                        # Check if entity's center/points are inside
+                        if entity.dxftype() == "LINE":
+                            mid_x = (entity.dxf.start.x + entity.dxf.end.x) / 2
+                            mid_y = (entity.dxf.start.y + entity.dxf.end.y) / 2
+                            if poly.contains(Point(mid_x, mid_y)):
+                                entity_inside = True
+                        elif entity.dxftype() == "CIRCLE":
+                            if poly.contains(Point(entity.dxf.center.x, entity.dxf.center.y)):
+                                entity_inside = True
+                        elif entity.dxftype() == "ARC":
+                            if poly.contains(Point(entity.dxf.center.x, entity.dxf.center.y)):
+                                entity_inside = True
+                    except Exception:
+                        pass
+                
+                if entity_inside:
+                    entities_inside += 1
+                    entities_inside_area += entity_area
+            except Exception:
+                continue
+        
+        # If there are many entities inside (more than 2-3), it's probably not a hollow column
+        # If total area of entities inside is significant (>20% of polygon area), it's not hollow
+        if entities_inside > 3:
+            return False
+        if entities_inside_area > poly.area * 0.2:
+            return False
+        
+        # If we get here, it's likely a hollow column
+        return True
+    except Exception:
+        return False
+
+
+def extract_columns(doc, room_layers: List[str], min_area_m2: float = 0.01, max_area_m2: float = 100.0) -> List[Polygon]:
+    """
+    Extract column/pillar polygons from DXF file.
+    Columns are typically small closed polygons that are not rooms.
+    NEW: Also detects "hollow" rectangles (empty inside, no grid/pattern) as columns.
+    Can be POLYLINE, LWPOLYLINE, SOLID, HATCH, or INSERT/BLOCK entities.
+    
+    Args:
+        doc: DXF document
+        room_layers: List of layer names that contain rooms (to exclude)
+        min_area_m2: Minimum area in m² to consider as column (default 0.05 m²)
+        max_area_m2: Maximum area in m² to consider as column (default 20.0 m²)
+    
+    Returns:
+        List of Polygon objects representing columns
+    """
+    msp = doc.modelspace()
+    room_layer_set = set(layer.upper() for layer in room_layers)
+    
+    # Keywords that might indicate columns/pillars
+    column_keywords = ["COLUMN", "PILLAR", "POST", "COL", "PIL", "BEAM", "STRUCT"]
+    
+    columns: List[Polygon] = []
+    
+    # Detect units to calculate area threshold
+    try:
+        bbox = msp.bbox()
+        max_dim = max(bbox.size.x, bbox.size.y)
+    except Exception:
+        minx, miny, maxx, maxy = _bbox_fallback(msp)
+        max_dim = max(maxx - minx, maxy - miny)
+    
+    # Guess units: if max dimension > 2000, likely mm, else meters
+    if max_dim > 2000:
+        scale = 1000.0  # mm to m
+    else:
+        scale = 1.0  # meters
+    
+    min_area_units = min_area_m2 * (scale ** 2)
+    max_area_units = max_area_m2 * (scale ** 2)
+    
+    # Helper function to check if polygon is a column
+    def is_column_polygon(poly: Polygon, layer: str, area: float) -> bool:
+        if not (min_area_units <= area <= max_area_units):
+            return False
+        
+        # Check if layer name suggests it's a column
+        is_column_layer = any(keyword in layer for keyword in column_keywords)
+        
+        # Check if it's a small rectangle/square (typical column shape)
+        bounds = poly.bounds
+        width = bounds[2] - bounds[0]
+        height = bounds[3] - bounds[1]
+        if min(width, height) <= 0:
+            return False
+        aspect_ratio = max(width, height) / min(width, height)
+        # More lenient: accept aspect ratio up to 6.0 for rectangular columns
+        is_small_rect = aspect_ratio < 6.0 and area < max_area_units
+        
+        return is_column_layer or is_small_rect
+    
+    # Extract closed polylines that might be columns
+    for e in msp.query("LWPOLYLINE"):
+        try:
+            layer = e.dxf.layer.upper()
+            # Skip room layers
+            if layer in room_layer_set:
+                continue
+            
+            if not e.closed:
+                continue
+            
+            pts = [(v[0], v[1]) for v in e.get_points()]
+            if len(pts) < 3:
+                continue
+            
+            poly = Polygon(pts)
+            if not (poly.is_valid and poly.area > 0):
+                continue
+            
+            if is_column_polygon(poly, layer, poly.area):
+                columns.append(poly)
+        except Exception:
+            continue
+    
+    # Also check POLYLINE entities
+    for e in msp.query("POLYLINE"):
+        try:
+            layer = e.dxf.layer.upper()
+            if layer in room_layer_set:
+                continue
+            
+            if not e.is_closed:
+                continue
+            
+            pts = [(v.dxf.location.x, v.dxf.location.y) for v in e.vertices]
+            if len(pts) < 3:
+                continue
+            
+            poly = Polygon(pts)
+            if not (poly.is_valid and poly.area > 0):
+                continue
+            
+            if is_column_polygon(poly, layer, poly.area):
+                columns.append(poly)
+        except Exception:
+            continue
+    
+    # Check INSERT/BLOCK entities that might be columns
+    # These are often used for structural elements like columns
+    for e in msp.query("INSERT"):
+        try:
+            layer = e.dxf.layer.upper()
+            if layer in room_layer_set:
+                continue
+            
+            block_name = e.dxf.name.upper()
+            
+            # Check if block name suggests it's a column
+            is_column_block = any(keyword in block_name for keyword in column_keywords)
+            is_column_layer = any(keyword in layer for keyword in column_keywords)
+            
+            if not (is_column_block or is_column_layer):
+                continue
+            
+            # Get block definition to check its size
+            try:
+                block_def = doc.blocks.get(block_name)
+                if block_def is None:
+                    continue
+                
+                # Get bounding box of block
+                try:
+                    block_bbox = block_def.bbox()
+                    if block_bbox is None:
+                        continue
+                    (x1, y1, _), (x2, y2, _) = block_bbox.extmin, block_bbox.extmax
+                    width = abs(x2 - x1)
+                    height = abs(y2 - y1)
+                    area = width * height
+                except Exception:
+                    # Fallback: estimate from block entities
+                    minx = miny = float("inf")
+                    maxx = maxy = float("-inf")
+                    for be in block_def:
+                        try:
+                            if be.dxftype() in ("LINE", "LWPOLYLINE", "POLYLINE", "CIRCLE", "ARC"):
+                                be_bbox = be.bbox()
+                                if be_bbox:
+                                    (bx1, by1, _), (bx2, by2, _) = be_bbox.extmin, be_bbox.extmax
+                                    minx = min(minx, bx1)
+                                    miny = min(miny, by1)
+                                    maxx = max(maxx, bx2)
+                                    maxy = max(maxy, by2)
+                        except Exception:
+                            continue
+                    if minx == float("inf"):
+                        continue
+                    width = maxx - minx
+                    height = maxy - miny
+                    area = width * height
+                
+                # Check if size is in column range
+                if min_area_units <= area <= max_area_units:
+                    # Create a polygon representing the column block
+                    insert_x = e.dxf.insert.x
+                    insert_y = e.dxf.insert.y
+                    scale_x = e.dxf.xscale if hasattr(e.dxf, 'xscale') else 1.0
+                    scale_y = e.dxf.yscale if hasattr(e.dxf, 'yscale') else 1.0
+                    
+                    # Create rectangle polygon at insertion point
+                    half_w = (width * scale_x) / 2
+                    half_h = (height * scale_y) / 2
+                    col_poly = Polygon([
+                        (insert_x - half_w, insert_y - half_h),
+                        (insert_x + half_w, insert_y - half_h),
+                        (insert_x + half_w, insert_y + half_h),
+                        (insert_x - half_w, insert_y + half_h)
+                    ])
+                    if col_poly.is_valid:
+                        columns.append(col_poly)
+            except Exception:
+                continue
+        except Exception:
+            continue
+    
+    # Also check for rectangular shapes made from LINE entities (common for columns)
+    # Group lines by layer and check if they form small rectangles
+    from collections import defaultdict
+    line_groups = defaultdict(list)
+    
+    for e in msp.query("LINE"):
+        try:
+            layer = e.dxf.layer.upper()
+            if layer in room_layer_set:
+                continue
+            
+            # Check if layer suggests it's a column
+            is_column_layer = any(keyword in layer for keyword in column_keywords)
+            if not is_column_layer:
+                continue
+            
+            line_groups[layer].append(e)
+        except Exception:
+            continue
+    
+    # Try to form rectangles from lines on the same layer
+    for layer, lines in line_groups.items():
+        if len(lines) < 4:  # Need at least 4 lines for a rectangle
+            continue
+        
+        # Collect all endpoints
+        points = []
+        for line in lines:
+            try:
+                points.append((line.dxf.start.x, line.dxf.start.y))
+                points.append((line.dxf.end.x, line.dxf.end.y))
+            except Exception:
+                continue
+        
+        if len(points) < 4:
+            continue
+        
+        # Find bounding box
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        minx, maxx = min(xs), max(xs)
+        miny, maxy = min(ys), max(ys)
+        width = maxx - minx
+        height = maxy - miny
+        area = width * height
+        
+        # Check if it's a small rectangle (likely a column)
+        if min_area_units <= area <= max_area_units:
+            # Create polygon from bounding box
+            rect_poly = Polygon([
+                (minx, miny),
+                (maxx, miny),
+                (maxx, maxy),
+                (minx, maxy)
+            ])
+            if rect_poly.is_valid:
+                columns.append(rect_poly)
+    
+    # Check SOLID entities (CRITICAL: often used for filled rectangles like orange/tan columns)
+    # These are the filled squares shown in the user's image - MUST be detected!
+    print(f"   🔍 Checking SOLID entities (filled rectangles like orange/tan columns)...")
+    solid_count = 0
+    for e in msp.query("SOLID"):
+        try:
+            layer = e.dxf.layer.upper()
+            if layer in room_layer_set:
+                continue
+            
+            # Get SOLID vertices - these are filled rectangles, likely columns
+            try:
+                v1 = e.dxf.v1
+                v2 = e.dxf.v2
+                v3 = e.dxf.v3
+                v4 = e.dxf.v4 if hasattr(e.dxf, 'v4') else v3
+                
+                # Create polygon from SOLID vertices
+                solid_poly = Polygon([(v1.x, v1.y), (v2.x, v2.y), (v3.x, v3.y), (v4.x, v4.y)])
+                if solid_poly.is_valid and solid_poly.area > 0:
+                    # Check if it's a small rectangular shape (likely column)
+                    # IMPORTANT: Don't filter by layer name - filled SOLIDs are often columns!
+                    if min_area_units <= solid_poly.area <= max_area_units:
+                        bounds = solid_poly.bounds
+                        width = bounds[2] - bounds[0]
+                        height = bounds[3] - bounds[1]
+                        if min(width, height) > 0:
+                            aspect_ratio = max(width, height) / min(width, height)
+                            # Accept rectangular shapes (columns are often square or slightly rectangular)
+                            if aspect_ratio < 6.0:
+                                # Check for duplicates
+                                already_added = False
+                                for existing_col in columns:
+                                    try:
+                                        if existing_col.intersects(solid_poly):
+                                            intersection = existing_col.intersection(solid_poly)
+                                            if intersection.area > solid_poly.area * 0.5:
+                                                already_added = True
+                                                break
+                                    except Exception:
+                                        pass
+                                if not already_added:
+                                    columns.append(solid_poly)
+                                    solid_count += 1
+            except Exception:
+                continue
+        except Exception:
+            continue
+    if solid_count > 0:
+        print(f"      Found {solid_count} column(s) from SOLID entities")
+    
+    # Check HATCH entities (CRITICAL: filled areas, often used for colored columns like orange/tan)
+    # These are the filled squares shown in the user's image - MUST be detected!
+    print(f"   🔍 Checking HATCH entities (filled areas like colored columns)...")
+    hatch_count = 0
+    for e in msp.query("HATCH"):
+        try:
+            layer = e.dxf.layer.upper()
+            if layer in room_layer_set:
+                continue
+            
+            # Get HATCH boundary paths (check ALL hatches, not just column-named ones)
+            # Filled columns are often represented as HATCH entities
+            try:
+                if hasattr(e, 'paths') and e.paths:
+                    for path in e.paths:
+                        if hasattr(path, 'vertices'):
+                            vertices = [(v[0], v[1]) for v in path.vertices if len(v) >= 2]
+                            if len(vertices) >= 3:
+                                hatch_poly = Polygon(vertices)
+                                if hatch_poly.is_valid and hatch_poly.area > 0:
+                                    # Check if it's a small rectangular shape (likely column)
+                                    # IMPORTANT: Don't filter by layer name - filled HATCHes are often columns!
+                                    if min_area_units <= hatch_poly.area <= max_area_units:
+                                        bounds = hatch_poly.bounds
+                                        width = bounds[2] - bounds[0]
+                                        height = bounds[3] - bounds[1]
+                                        if min(width, height) > 0:
+                                            aspect_ratio = max(width, height) / min(width, height)
+                                            # Accept rectangular shapes (columns are often square or slightly rectangular)
+                                            if aspect_ratio < 6.0:
+                                                # Check for duplicates
+                                                already_added = False
+                                                for existing_col in columns:
+                                                    try:
+                                                        if existing_col.intersects(hatch_poly):
+                                                            intersection = existing_col.intersection(hatch_poly)
+                                                            if intersection.area > hatch_poly.area * 0.5:
+                                                                already_added = True
+                                                                break
+                                                    except Exception:
+                                                        pass
+                                                if not already_added:
+                                                    columns.append(hatch_poly)
+                                                    hatch_count += 1
+            except Exception:
+                continue
+        except Exception:
+            continue
+    if hatch_count > 0:
+        print(f"      Found {hatch_count} column(s) from HATCH entities")
+    
+    # ULTRA-AGGRESSIVE detection: find ALL small closed polygons regardless of layer name
+    # NEW: Also check if polygons are "hollow" (empty inside) - these are likely columns
+    # This is critical to catch filled columns (like orange/tan squares in the image)
+    # Exclude only room layers and very large/small shapes
+    print(f"   🔍 Scanning all closed polygons for column detection (including hollow detection)...")
+    
+    hollow_count = 0
+    for e in msp.query("LWPOLYLINE"):
+        try:
+            layer = e.dxf.layer.upper()
+            if layer in room_layer_set:
+                continue
+            
+            if not e.closed:
+                continue
+            
+            pts = [(v[0], v[1]) for v in e.get_points()]
+            if len(pts) < 3:
+                continue
+            
+            poly = Polygon(pts)
+            if not (poly.is_valid and poly.area > 0):
+                continue
+            
+            # Check if it's a small rectangle/square (likely a column)
+            if min_area_units <= poly.area <= max_area_units:
+                bounds = poly.bounds
+                width = bounds[2] - bounds[0]
+                height = bounds[3] - bounds[1]
+                if min(width, height) <= 0:
+                    continue
+                aspect_ratio = max(width, height) / min(width, height)
+                
+                # Small, roughly square/rectangular shapes are likely columns
+                # Be more lenient: accept aspect ratio up to 6.0
+                if aspect_ratio < 6.0:
+                    # NEW: Check if it's a hollow polygon (empty inside, no grid/pattern)
+                    is_hollow = is_hollow_polygon(poly, msp, room_layer_set, min_area_units, max_area_units)
+                    
+                    # Accept if it's hollow OR if it matches column criteria
+                    if is_hollow or is_column_polygon(poly, layer, poly.area):
+                        # Check if it's not already in the list (avoid duplicates)
+                        already_added = False
+                        for existing_col in columns:
+                            try:
+                                # Check if they overlap significantly
+                                if existing_col.intersects(poly):
+                                    intersection = existing_col.intersection(poly)
+                                    if intersection.area > poly.area * 0.5:  # More than 50% overlap
+                                        already_added = True
+                                        break
+                            except Exception:
+                                pass
+                        if not already_added:
+                            columns.append(poly)
+                            if is_hollow:
+                                hollow_count += 1
+        except Exception:
+            continue
+    
+    if hollow_count > 0:
+        print(f"      Found {hollow_count} hollow column(s) (empty inside, no grid/pattern)")
+    
+    # Also check POLYLINE entities with same aggressive approach
+    for e in msp.query("POLYLINE"):
+        try:
+            layer = e.dxf.layer.upper()
+            if layer in room_layer_set:
+                continue
+            
+            if not e.is_closed:
+                continue
+            
+            pts = [(v.dxf.location.x, v.dxf.location.y) for v in e.vertices]
+            if len(pts) < 3:
+                continue
+            
+            poly = Polygon(pts)
+            if not (poly.is_valid and poly.area > 0):
+                continue
+            
+            if min_area_units <= poly.area <= max_area_units:
+                bounds = poly.bounds
+                width = bounds[2] - bounds[0]
+                height = bounds[3] - bounds[1]
+                if min(width, height) <= 0:
+                    continue
+                aspect_ratio = max(width, height) / min(width, height)
+                
+                if aspect_ratio < 6.0:
+                    already_added = False
+                    for existing_col in columns:
+                        try:
+                            if existing_col.intersects(poly):
+                                intersection = existing_col.intersection(poly)
+                                if intersection.area > poly.area * 0.5:
+                                    already_added = True
+                                    break
+                        except Exception:
+                            pass
+                    if not already_added:
+                        columns.append(poly)
+        except Exception:
+            continue
+    
+    return columns
+
+
+def place_detectors_in_room(room_poly: Polygon, spacing_units: float, margin_units: float, grid_type: str, building_bounds: Polygon = None, columns: Optional[List[Polygon]] = None):
+    # Default buffer distance: 2.0m radius
+    buffer_distance_default = 2.0 * (1000.0 if spacing_units > 100 else 1.0)
     if room_poly.area <= 0:
-        return []
+        return [], buffer_distance_default
     inner = offset_interior(room_poly, margin_units)
     if inner.is_empty:
-        return []
+        return [], buffer_distance_default
     if grid_type == "hex":
         pts = hex_grid_points_in_poly(inner, spacing_units)
     else:
@@ -680,6 +1246,9 @@ def place_detectors_in_room(room_poly: Polygon, spacing_units: float, margin_uni
         c = inner.centroid
         if inner.contains(c):
             pts = [(c.x, c.y)]
+    
+    # Default buffer distance: 2.0m radius
+    buffer_distance_default = 2.0 * (1000.0 if spacing_units > 100 else 1.0)
     
     # Filter points that are outside building bounds if provided
     if building_bounds and pts:
@@ -691,14 +1260,193 @@ def place_detectors_in_room(room_poly: Polygon, spacing_units: float, margin_uni
             if building_bounds.contains(pt) or building_bounds.distance(pt) <= 0.5:
                 filtered_pts.append((x, y))
         pts = filtered_pts
+        # If no points after building bounds filtering, return early
+        if not pts:
+            return [], buffer_distance_default
     
-    return pts
+    # Filter points that overlap with columns
+    # IMPORTANT: This must run AFTER building bounds filtering
+    # CRITICAL: User said "ถ้ามันใกล้เสา ไม่ต้องปักก็ได้" - skip points near columns!
+    if columns is not None and len(columns) > 0 and pts:
+        filtered_pts = []
+        original_count = len(pts)
+        # Calculate buffer distance: USER REQUEST - "ให้วาดวงกลมรัศมี 2เมตร แล้วห้ามปัก ในเขตนั้น"
+        # Use EXACTLY 2.0 meters radius for column exclusion zones
+        # This ensures detectors are placed OUTSIDE the 2m radius circle, not ON or near columns
+        # Detect units from spacing_units magnitude: if > 100, likely mm; else meters
+        buffer_radius_m = 2.0  # EXACTLY 2.0 meters radius as requested by user
+        if spacing_units > 100:
+            # Likely mm units, so 2.0m = 2000mm
+            buffer_distance = buffer_radius_m * 1000
+        else:
+            # Likely meters
+            buffer_distance = buffer_radius_m
+        
+        # Convert buffer to meters for debug output
+        buffer_m = buffer_distance / (1000.0 if spacing_units > 100 else 1.0)
+        
+        print(f"   🔍 Checking {original_count} detector points against {len(columns)} columns")
+        print(f"   ⚠️  CRITICAL: Skipping ALL points within {buffer_m:.2f} m radius of any column")
+        print(f"   ⚠️  User: 'ให้วาดวงกลมรัศมี 2เมตร แล้วห้ามปัก ในเขตนั้น' - using 2.0m radius exclusion zone")
+        
+        overlaps_count = 0
+        overlap_details = []  # Store details for debugging
+        
+        for (x, y) in pts:
+            pt = Point(x, y)
+            # Check if point is inside any column (with buffer)
+            overlaps_column = False
+            closest_col_idx = None
+            closest_distance = float('inf')
+            
+            for idx, col_poly in enumerate(columns):
+                try:
+                    # USER REQUEST: "ให้วาดวงกลมรัศมี 2เมตร แล้วห้ามปัก ในเขตนั้น"
+                    # Check if point is within 2m radius circle around column CENTROID
+                    # Get column centroid (center point)
+                    col_centroid = col_poly.centroid
+                    col_center = Point(col_centroid.x, col_centroid.y)
+                    
+                    # Calculate distance from point to column center
+                    dist_to_center = pt.distance(col_center)
+                    
+                    # Check 1: If point is within 2m radius circle from column center, reject it
+                    # This is the PRIMARY check - user wants 2m radius exclusion zone
+                    if dist_to_center < buffer_distance:
+                        overlaps_column = True
+                        overlaps_count += 1
+                        if dist_to_center < closest_distance:
+                            closest_distance = dist_to_center
+                            closest_col_idx = idx
+                        break
+                    
+                    # Check 2: Also check if point is inside column polygon itself (safety check)
+                    if col_poly.contains(pt):
+                        overlaps_column = True
+                        overlaps_count += 1
+                        closest_col_idx = idx
+                        closest_distance = 0.0
+                        break
+                    
+                    # Check 4: Additional safety check - check if point is within column bounds + buffer
+                    col_bounds = col_poly.bounds
+                    col_minx, col_miny, col_maxx, col_maxy = col_bounds
+                    # Expand bounds by buffer
+                    if (col_minx - buffer_distance <= x <= col_maxx + buffer_distance and
+                        col_miny - buffer_distance <= y <= col_maxy + buffer_distance):
+                        # Point is within expanded bounds, check distance again
+                        dist = col_poly.distance(pt)
+                        if dist < buffer_distance:
+                            overlaps_column = True
+                            overlaps_count += 1
+                            if dist < closest_distance:
+                                closest_distance = dist
+                                closest_col_idx = idx
+                            break
+                except Exception as e:
+                    # If ANY check fails, assume overlap for safety (better safe than sorry)
+                    overlaps_column = True
+                    overlaps_count += 1
+                    closest_col_idx = idx
+                    break
+            
+            if overlaps_column:
+                # Store overlap details for first few overlaps
+                if len(overlap_details) < 10:
+                    overlap_details.append((x, y, closest_col_idx, closest_distance))
+            else:
+                filtered_pts.append((x, y))
+        
+        filtered_count = len(filtered_pts)
+        removed = original_count - filtered_count
+        
+        # Always print debug info when columns are present
+        if removed > 0:
+            print(f"   ✅ SKIPPED {removed} detector point(s) that are too close to columns (buffer: {buffer_m:.2f} m)")
+            print(f"      (User instruction: 'ถ้ามันใกล้เสา ไม่ต้องปักก็ได้' - skipping points near columns)")
+            if overlap_details:
+                print(f"      Sample skipped points (first {min(5, len(overlap_details))}):")
+                for ox, oy, col_idx, dist in overlap_details[:5]:
+                    dist_m = dist / (1000.0 if spacing_units > 100 else 1.0)
+                    print(f"         Point ({ox:.1f}, {oy:.1f}) too close to column #{col_idx+1} (distance: {dist_m:.2f} m) - SKIPPED")
+        elif original_count > 0:
+            # No points filtered - this might indicate columns aren't being detected properly
+            print(f"   ⚠️  WARNING: {original_count} detector points checked, but NONE were filtered (columns: {len(columns)})")
+            print(f"      This might mean:")
+            print(f"      1. Columns are not overlapping detector points (good!)")
+            print(f"      2. OR columns are not being detected properly (bad!)")
+            print(f"      3. OR columns list is not being passed correctly (bad!)")
+            # Show sample detector points and columns for debugging
+            if len(pts) > 0 and len(columns) > 0:
+                sample_pt = Point(pts[0][0], pts[0][1])
+                sample_col = columns[0]
+                dist_to_col = sample_col.distance(sample_pt)
+                dist_m = dist_to_col / (1000.0 if spacing_units > 100 else 1.0)
+                print(f"      DEBUG: First detector at ({pts[0][0]:.1f}, {pts[0][1]:.1f}), distance to first column: {dist_m:.2f} m")
+                print(f"      DEBUG: Buffer distance is {buffer_m:.2f} m - if distance < buffer, point should be filtered")
+                if dist_m < buffer_m:
+                    print(f"      ⚠️  ERROR: Point should have been filtered but wasn't! This is a bug!")
+                else:
+                    print(f"      ✅ Point is far enough from column (distance {dist_m:.2f} m > buffer {buffer_m:.2f} m)")
+        
+        pts = filtered_pts
+        
+        # FINAL VERIFICATION: Double-check that no points are inside columns
+        # This is a safety check to catch any points that might have slipped through
+        final_check_count = 0
+        for (x, y) in pts:
+            pt = Point(x, y)
+            for col_poly in columns:
+                try:
+                    if col_poly.contains(pt):
+                        final_check_count += 1
+                        print(f"   ⚠️  ERROR: Point ({x:.1f}, {y:.1f}) is INSIDE a column but wasn't filtered! This is a bug!")
+                        break
+                except Exception:
+                    pass
+        
+        if final_check_count > 0:
+            print(f"   ⚠️  WARNING: {final_check_count} point(s) passed filtering but are still inside columns!")
+            # Remove these points
+            final_filtered = []
+            for (x, y) in pts:
+                pt = Point(x, y)
+                is_inside = False
+                for col_poly in columns:
+                    try:
+                        if col_poly.contains(pt):
+                            is_inside = True
+                            break
+                    except Exception:
+                        pass
+                if not is_inside:
+                    final_filtered.append((x, y))
+            pts = final_filtered
+            print(f"   ✅ Removed {final_check_count} point(s) that were inside columns")
+    elif columns is not None and len(columns) == 0:
+        # Columns list is empty
+        if pts:
+            print(f"   ⚠️  Warning: No columns detected, {len(pts)} detector points placed without column filtering")
+            print(f"   ⚠️  This is why detectors are still overlapping columns!")
+        buffer_distance = buffer_distance_default
+    elif columns is None:
+        # Columns not provided
+        if pts:
+            print(f"   ⚠️  ERROR: Columns list is None, {len(pts)} detector points placed without column filtering")
+            print(f"   ⚠️  This is why detectors are still overlapping columns!")
+        buffer_distance = buffer_distance_default
+    
+    return pts, buffer_distance
 
 
 def write_output_dxf(src_doc, out_path: Path, points_by_room: List[Dict], offset_x: float = 0.0, offset_y: float = 0.0,
-                     coverage_radius: float | None = None):
+                     coverage_radius: Optional[float] = None, coverage_radius_m: Optional[float] = None,
+                     columns: Optional[List[Polygon]] = None, buffer_distance: Optional[float] = None):
     doc = src_doc
     msp = doc.modelspace()
+    
+    # Debug: Check if columns and buffer_distance are provided
+    print(f"🔍 write_output_dxf: columns={columns is not None}, columns_count={len(columns) if columns else 0}, buffer_distance={buffer_distance}")
 
     # Calculate appropriate symbol size based on drawing extents
     try:
@@ -712,6 +1460,9 @@ def write_output_dxf(src_doc, out_path: Path, points_by_room: List[Dict], offset
     # Symbol size: about 0.3-0.5% of drawing dimension (visible but not overwhelming)
     symbol_radius = max_dim * 0.004  # 0.4%
     cross_size = symbol_radius * 1.5
+    
+    # Text height: about 0.2% of drawing dimension for radius labels
+    text_height = max_dim * 0.002
 
     layer_name = "SMOKE_DETECTORS"
     try:
@@ -724,6 +1475,7 @@ def write_output_dxf(src_doc, out_path: Path, points_by_room: List[Dict], offset
             pass
     
     coverage_layer_name = "SMOKE_COVERAGE"
+    coverage_text_layer_name = "SMOKE_COVERAGE_TEXT"
     if coverage_radius and coverage_radius > 0:
         try:
             if coverage_layer_name not in doc.layers:
@@ -732,6 +1484,16 @@ def write_output_dxf(src_doc, out_path: Path, points_by_room: List[Dict], offset
         except Exception:
             try:
                 doc.layers.add(coverage_layer_name)
+            except Exception:
+                pass
+        
+        # Create layer for radius text labels
+        try:
+            if coverage_text_layer_name not in doc.layers:
+                doc.layers.add(name=coverage_text_layer_name, color=3)
+        except Exception:
+            try:
+                doc.layers.add(coverage_text_layer_name)
             except Exception:
                 pass
 
@@ -744,6 +1506,145 @@ def write_output_dxf(src_doc, out_path: Path, points_by_room: List[Dict], offset
         blk.add_line((-cross_size, 0), (cross_size, 0), dxfattribs={"color": 1})
         blk.add_line((0, -cross_size), (0, cross_size), dxfattribs={"color": 1})
 
+    # USER REQUEST: "ให้วาดวงกลมรัศมี 2เมตร" - Draw 2m radius circles around columns FIRST
+    # Draw circles BEFORE filtering points so they're always visible
+    if columns is not None and len(columns) > 0:
+        print(f"   📐 Drawing 2.0m radius circles around {len(columns)} columns...")
+        # Create a layer for column buffer zones
+        column_buffer_layer = "COLUMN_BUFFER_ZONES"
+        try:
+            if column_buffer_layer not in doc.layers:
+                doc.layers.add(name=column_buffer_layer, color=6)  # Magenta color for visibility
+                print(f"   ✅ Created layer '{column_buffer_layer}' for column buffer zones")
+        except Exception:
+            try:
+                doc.layers.add(column_buffer_layer)
+                print(f"   ✅ Created layer '{column_buffer_layer}' for column buffer zones (fallback)")
+            except Exception:
+                print(f"   ⚠️  Warning: Could not create layer '{column_buffer_layer}'")
+        
+        # Calculate buffer distance for visualization
+        # USER REQUEST: "ให้วาดวงกลมรัศมี 2เมตร" - Use EXACTLY 2.0 meters radius
+        if buffer_distance is not None and buffer_distance > 0:
+            buffer_vis_units = buffer_distance
+            print(f"   📏 Using buffer_distance from parameter: {buffer_vis_units} units")
+        else:
+            # Fallback: use 2.0m radius
+            try:
+                bbox = msp.bbox()
+                max_dim = max(bbox.size.x, bbox.size.y)
+            except Exception:
+                minx, miny, maxx, maxy = _bbox_fallback(msp)
+                max_dim = max(maxx - minx, maxy - miny)
+            if max_dim > 2000:
+                buffer_vis_units = 2000  # 2m in mm
+            else:
+                buffer_vis_units = 2.0  # 2m
+            print(f"   📏 Using fallback buffer_distance: {buffer_vis_units} units (max_dim: {max_dim:.1f})")
+        
+        # Convert to meters for display
+        try:
+            bbox = msp.bbox()
+            max_dim = max(bbox.size.x, bbox.size.y)
+        except Exception:
+            minx, miny, maxx, maxy = _bbox_fallback(msp)
+            max_dim = max(maxx - minx, maxy - miny)
+        buffer_vis_m = buffer_vis_units / (1000.0 if max_dim > 2000 else 1.0)
+        
+        print(f"   ⚠️  User: 'ให้วาดวงกลมรัศมี 2เมตร แล้วห้ามปัก ในเขตนั้น' - drawing circles on layer 'COLUMN_BUFFER_ZONES'")
+        print(f"   📐 Buffer radius: {buffer_vis_units} units = {buffer_vis_m:.2f} m")
+        
+        # Draw 2m radius circles around each column
+        circles_drawn = 0
+        for col_idx, col_poly in enumerate(columns):
+            try:
+                # Get column centroid
+                centroid = col_poly.centroid
+                print(f"   🔵 Column #{col_idx+1}: centroid=({centroid.x:.2f}, {centroid.y:.2f}), radius={buffer_vis_units:.2f}")
+                
+                # Draw circle with EXACTLY 2.0m radius around column center
+                circle = msp.add_circle(center=(centroid.x, centroid.y), radius=buffer_vis_units,
+                                      dxfattribs={"layer": column_buffer_layer})
+                circles_drawn += 1
+                print(f"      ✅ Circle drawn successfully")
+            except Exception as e:
+                print(f"   ⚠️  ERROR: Could not draw circle for column #{col_idx+1}: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        print(f"   ✅ Successfully drew {circles_drawn} circles around {len(columns)} columns")
+    
+    # FINAL SAFETY CHECK: Filter out any points that are inside columns before writing
+    # This is a last-resort check to ensure NO detectors are placed on columns
+    # CRITICAL: User showed image with detector overlapping column - MUST prevent this!
+    filtered_points_by_room = []
+    if columns is not None and len(columns) > 0:
+        total_points = sum(len(r['points']) for r in points_by_room)
+        print(f"🔍 Final safety check: Verifying {total_points} detector points against {len(columns)} columns...")
+        print(f"   ⚠️  CRITICAL: Removing ANY points that are inside columns before writing to DXF!")
+        removed_count = 0
+        for room in points_by_room:
+            filtered_points = []
+            for (x, y) in room["points"]:
+                # Apply offset to get final position
+                adjusted_x = x + offset_x
+                adjusted_y = y + offset_y
+                pt = Point(adjusted_x, adjusted_y)
+                
+                # Check if point is inside any column - STRICT CHECK
+                is_inside_column = False
+                for col_idx, col_poly in enumerate(columns):
+                    try:
+                        # Check 1: Direct containment
+                        if col_poly.contains(pt):
+                            is_inside_column = True
+                            removed_count += 1
+                            print(f"   ⚠️  REMOVED: Point ({adjusted_x:.1f}, {adjusted_y:.1f}) is INSIDE column #{col_idx+1} - skipping!")
+                            break
+                        
+                        # Check 2: Distance check - if point is very close to column, reject it
+                        dist_to_col = col_poly.distance(pt)
+                        if dist_to_col < 0.1:  # If within 0.1 units, reject it
+                            is_inside_column = True
+                            removed_count += 1
+                            print(f"   ⚠️  REMOVED: Point ({adjusted_x:.1f}, {adjusted_y:.1f}) is too close to column #{col_idx+1} (distance: {dist_to_col:.3f}) - skipping!")
+                            break
+                        
+                        # Check 3: Also check with tiny buffer to catch points on edge
+                        tiny_buffer = 0.1  # Small buffer to catch points on edge
+                        if col_poly.buffer(tiny_buffer, resolution=16).contains(pt):
+                            is_inside_column = True
+                            removed_count += 1
+                            print(f"   ⚠️  REMOVED: Point ({adjusted_x:.1f}, {adjusted_y:.1f}) is ON/INSIDE column #{col_idx+1} edge - skipping!")
+                            break
+                    except Exception as e:
+                        # If check fails, assume inside for safety
+                        is_inside_column = True
+                        removed_count += 1
+                        print(f"   ⚠️  REMOVED: Point ({adjusted_x:.1f}, {adjusted_y:.1f}) - check failed, assuming inside column - skipping!")
+                        break
+                
+                if not is_inside_column:
+                    filtered_points.append((x, y))
+            
+            filtered_points_by_room.append({
+                **room,
+                "points": filtered_points
+            })
+        
+        if removed_count > 0:
+            print(f"   ✅ Removed {removed_count} detector point(s) that were inside/on columns (final safety check)")
+        else:
+            print(f"   ✅ All {total_points} detector points passed final safety check (none inside columns)")
+        points_by_room = filtered_points_by_room
+    elif columns is None:
+        print(f"   ⚠️  WARNING: columns is None in write_output_dxf - cannot perform final safety check!")
+        print(f"   ⚠️  This might be why detectors are still overlapping columns!")
+    elif len(columns) == 0:
+        print(f"   ⚠️  WARNING: columns list is empty in write_output_dxf - cannot perform final safety check!")
+        print(f"   ⚠️  This might be why detectors are still overlapping columns!")
+        print(f"   ⚠️  No columns were detected - detectors may overlap columns!")
+    
     total_placed = 0
     for room in points_by_room:
         for (x, y) in room["points"]:
@@ -752,8 +1653,27 @@ def write_output_dxf(src_doc, out_path: Path, points_by_room: List[Dict], offset
             adjusted_y = y + offset_y
             msp.add_blockref(blk_name, insert=(adjusted_x, adjusted_y), dxfattribs={"layer": layer_name})
             if coverage_radius and coverage_radius > 0:
+                # Add coverage circle
                 msp.add_circle(center=(adjusted_x, adjusted_y), radius=coverage_radius,
                                dxfattribs={"layer": coverage_layer_name})
+                
+                # Add radius text label if radius in meters is provided
+                if coverage_radius_m is not None and coverage_radius_m > 0:
+                    # Position text at top-right of circle (45 degrees from center)
+                    text_offset = coverage_radius * 1.1  # Slightly outside the circle
+                    text_x = adjusted_x + text_offset * 0.707  # cos(45°)
+                    text_y = adjusted_y + text_offset * 0.707  # sin(45°)
+                    
+                    # Format radius text: "R: X.XX m"
+                    radius_text = f"R: {coverage_radius_m:.2f} m"
+                    msp.add_text(
+                        radius_text,
+                        dxfattribs={
+                            "layer": coverage_text_layer_name,
+                            "height": text_height,
+                            "color": 3  # Green to match circle
+                        }
+                    ).set_placement((text_x, text_y))
             total_placed += 1
 
     doc.saveas(out_path.as_posix())
@@ -978,6 +1898,48 @@ def main():
     if building_bounds:
         print(f"🏢 Created building bounds for filtering")
     
+    # Extract columns/pillars to avoid placing detectors on them
+    # USER REQUEST: "ถ้าเจอเสาแบบนี้ไม่ว่าจะขนาดไหน ให้วาดวงรอบตัวเสา และห้ามปักจุดในวงนั้น"
+    # So we detect ALL rectangular shapes regardless of size (within reasonable limits)
+    print(f"🔍 Detecting columns/pillars...")
+    print(f"   ⚠️  CRITICAL: Detecting ALL rectangular shapes (any size) that might be columns")
+    print(f"   ⚠️  User: 'ถ้าเจอเสาแบบนี้ไม่ว่าจะขนาดไหน' - detecting columns of any size")
+    columns = extract_columns(doc, room_layers, min_area_m2=0.01, max_area_m2=100.0)
+    if columns and len(columns) > 0:
+        print(f"🏛️  Found {len(columns)} columns/pillars to avoid")
+        print(f"   ⚠️  CRITICAL: These columns will be used to filter detector placement")
+        # Debug: show first few column areas and dimensions
+        if len(columns) <= 10:
+            for i, col in enumerate(columns):
+                area_m2 = col.area / (scale ** 2)
+                bounds = col.bounds
+                width_m = (bounds[2] - bounds[0]) / scale
+                height_m = (bounds[3] - bounds[1]) / scale
+                center_x = (bounds[0] + bounds[2]) / 2
+                center_y = (bounds[1] + bounds[3]) / 2
+                print(f"   Column {i+1}: area={area_m2:.2f} m², size={width_m:.2f}×{height_m:.2f} m, center=({center_x:.1f}, {center_y:.1f})")
+        elif len(columns) > 10:
+            # Show summary for many columns
+            total_area = sum(col.area for col in columns) / (scale ** 2)
+            avg_area = total_area / len(columns)
+            print(f"   (showing summary: {len(columns)} columns, avg area={avg_area:.2f} m²)")
+            # Show first 5 for reference
+            print(f"   First 5 columns:")
+            for i, col in enumerate(columns[:5]):
+                area_m2 = col.area / (scale ** 2)
+                bounds = col.bounds
+                center_x = (bounds[0] + bounds[2]) / 2
+                center_y = (bounds[1] + bounds[3]) / 2
+                print(f"      Column {i+1}: area={area_m2:.2f} m², center=({center_x:.1f}, {center_y:.1f})")
+    else:
+        print(f"⚠️  No columns detected - detectors may overlap columns")
+        print(f"💡 Try running with --inspect to see available layers and entities")
+        print(f"💡 Columns are detected as small rectangular shapes (0.05-20 m²) that are not room layers")
+        print(f"💡 If you see square/rectangular shapes in your drawing, they might be:")
+        print(f"      - On room layers (excluded from detection)")
+        print(f"      - Too large or too small (outside 0.05-20 m² range)")
+        print(f"      - Not closed polygons (must be LWPOLYLINE/POLYLINE with closed=True)")
+    
     # Auto-detect or use specified offset
     if args.offset_x is not None and args.offset_y is not None:
         offset_x = args.offset_x
@@ -987,11 +1949,29 @@ def main():
         offset_x, offset_y = auto_detect_offset(doc, rooms, room_layers)
     
     points_by_room: List[Dict] = []
+    buffer_distance_for_drawing = 0.0  # Initialize buffer for drawing
+    print(f"📊 Processing {len(rooms)} rooms with column filtering...")
+    if columns and len(columns) > 0:
+        print(f"   ✅ Using {len(columns)} detected columns for filtering")
+        print(f"   ⚠️  CRITICAL: All detector points will be checked against these columns")
+        print(f"   ⚠️  User instruction: 'ให้วาดวงกลมรัศมี 2เมตร แล้วห้ามปัก ในเขตนั้น' - using 2.0m radius exclusion zone")
+    else:
+        print(f"   ⚠️  WARNING: No columns detected - detectors may overlap columns!")
+        print(f"   ⚠️  This might be why detectors are still overlapping columns!")
     for i, (layer, poly) in enumerate(rooms):
         area_m2 = poly.area / (scale ** 2)
         if area_m2 < args.min_area:
             continue
-        pts = place_detectors_in_room(poly, spacing_units, margin_units, args.grid, building_bounds)
+        # Pass columns to place_detectors_in_room - MUST pass columns list!
+        if columns is None:
+            print(f"   ⚠️  ERROR: columns is None for room {i+1}! This will cause detectors to overlap columns!")
+        elif len(columns) == 0:
+            print(f"   ⚠️  WARNING: columns list is empty for room {i+1}! Detectors may overlap columns!")
+        else:
+            print(f"   Room {i+1}: Checking detector points against {len(columns)} columns...")
+        pts, room_buffer_distance = place_detectors_in_room(poly, spacing_units, margin_units, args.grid, building_bounds, columns)
+        if room_buffer_distance > buffer_distance_for_drawing:
+            buffer_distance_for_drawing = room_buffer_distance
         points_by_room.append({
             "index": i,
             "layer": layer,
@@ -1014,9 +1994,21 @@ def main():
     total = sum(len(r["points"]) for r in points_by_room)
     rooms_processed = sum(1 for r in points_by_room if r.get("layer") != "COVERAGE_FILL")
     
+    # Calculate buffer distance for column filtering
+    # USER REQUEST: "ให้วาดวงกลมรัศมี 2เมตร แล้วห้ามปัก ในเขตนั้น"
+    # Use EXACTLY 2.0 meters radius for column exclusion zones
+    buffer_radius_m = 2.0  # EXACTLY 2.0 meters radius as requested
+    if spacing_units > 100:
+        buffer_distance_for_columns = buffer_radius_m * 1000  # 2000mm
+    else:
+        buffer_distance_for_columns = buffer_radius_m  # 2.0m
+    print(f"📐 Column exclusion zone: {buffer_radius_m:.2f} m radius circles (user: 'ให้วาดวงกลมรัศมี 2เมตร แล้วห้ามปัก ในเขตนั้น')")
+    
     # Write output DXF with offset
     print(f"💾 Saving DXF with detectors: {out_path}")
-    total_placed = write_output_dxf(doc, out_path, points_by_room, offset_x, offset_y, coverage_radius_units_draw)
+    total_placed = write_output_dxf(doc, out_path, points_by_room, offset_x, offset_y, 
+                                     coverage_radius_units_draw, coverage_radius_m if args.coverage_circles else None,
+                                     columns, buffer_distance_for_drawing)
     
     if total_placed != total:
         print(f"⚠️  Warning: Expected {total} but placed {total_placed} detectors")
