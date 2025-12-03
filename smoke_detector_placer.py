@@ -2003,6 +2003,10 @@ def main():
         print(f"      - Too large or too small (outside 0.05-20 m² range)")
         print(f"      - Not closed polygons (must be LWPOLYLINE/POLYLINE with closed=True)")
     
+    # Always show total columns detected (including zero)
+    columns_count = len(columns) if columns else 0
+    print(f"🏛️  Columns detected: {columns_count}")
+    
     # Auto-detect or use specified offset
     if args.offset_x is not None and args.offset_y is not None:
         offset_x = args.offset_x
