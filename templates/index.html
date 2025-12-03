@@ -547,6 +547,9 @@
 
                 if (data.success) {
                     showResult(data.message, true, data.download_url);
+                    if (data.stats && data.stats.columns) {
+                        result.innerHTML += `<div style="margin-top:8px;">🏛️ จำนวนเสาที่พบ: ${data.stats.columns}</div>`;
+                    }
                 } else {
                     showResult(data.message, false);
                 }

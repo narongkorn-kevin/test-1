@@ -154,7 +154,8 @@ def process_dxf_file(filepath, standard='NFPA72', grid_type='square', spacing='9
                 stats = {
                     'rooms': 'N/A',
                     'detectors': 'N/A',
-                    'cleaned': 'N/A'
+                    'cleaned': 'N/A',
+                    'columns': 'N/A'
                 }
                 
                 for line in output_lines:
@@ -164,8 +165,13 @@ def process_dxf_file(filepath, standard='NFPA72', grid_type='square', spacing='9
                         stats['detectors'] = line.split('Placed')[1].split('detectors')[0].strip()
                     elif 'Cleaned' in line and 'detectors' in line:
                         stats['cleaned'] = line.split('Cleaned')[1].split('detectors')[0].strip()
+                    elif 'Columns detected:' in line:
+                        try:
+                            stats['columns'] = line.split('Columns detected:')[1].strip()
+                        except Exception:
+                            pass
                 
-                message = f"✅ Successfully processed! Found {stats['rooms']} rooms, placed {stats['detectors']} detectors"
+                message = f"✅ Successfully processed! Found {stats['rooms']} rooms, placed {stats['detectors']} detectors, columns {stats['columns']}"
                 if stats['cleaned'] != 'N/A':
                     message += f", cleaned {stats['cleaned']} old detectors"
                 
